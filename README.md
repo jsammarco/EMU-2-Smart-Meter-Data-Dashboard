@@ -20,6 +20,10 @@ Desktop dashboard for reading live EMU-2 smart meter data over a serial connecti
 - COM port selector with saved preferred port.
 - Automatic reconnect with a 3 second retry delay if the EMU-2 is unavailable or disconnects.
 - Saved preferred pricing source across app restarts.
+- Built-in mobile-friendly Bootstrap 5 web dashboard.
+- `--headless` mode for running the collector and web dashboard without the Tk desktop UI.
+- `--port` argument for choosing the web server port, with a default of `8000`.
+- Local SQLite history storage in `data/energy_history.sqlite3` for later analysis and charting.
 
 ## Requirements
 
@@ -39,7 +43,28 @@ pip install pyserial
 python dashboard.py
 ```
 
+Desktop mode also starts the web dashboard on `http://127.0.0.1:8000`.
+
+## Headless Mode
+
+```powershell
+python dashboard.py --headless
+```
+
+## Custom Web Port
+
+```powershell
+python dashboard.py --port 8080
+```
+
+Or with no desktop window:
+
+```powershell
+python dashboard.py --headless --port 8080
+```
+
 ## Notes
 
 - The app stores user preferences in `dashboard_config.json`.
 - If `ComEd Hourly Pricing` is selected, the dashboard uses the ComEd feed for the price gauge and estimated hourly cost instead of the EMU-2 price cluster value.
+- Runtime data is stored locally in `data/energy_history.sqlite3` and ignored by git.

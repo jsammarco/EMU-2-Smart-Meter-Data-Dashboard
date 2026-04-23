@@ -1,10 +1,14 @@
+import argparse
 import json
 import math
+import os
 import queue
 import re
+import sqlite3
 import threading
 import time
 import tkinter as tk
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from tkinter import ttk, scrolledtext, messagebox
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -40,6 +44,9 @@ COMED_FEED_URL = "https://hourlypricing.comed.com/api?type=5minutefeed"
 COMED_REFRESH_MS = 60_000
 
 CONFIG_FILE = "dashboard_config.json"
+DATA_DIR = "data"
+HISTORY_DB_FILE = os.path.join(DATA_DIR, "energy_history.sqlite3")
+HISTORY_RETENTION_LIMIT = 5000
 
 
 # ============================================================
@@ -158,6 +165,295 @@ def list_serial_port_names() -> list[str]:
     except Exception:
         ports = []
     return ports
+
+
+def build_web_dashboard_html(port: int) -> str:
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EMU-2 Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {{
+      --bg: #0f172a;
+      --card: #111827;
+      --border: #243244;
+      --text: #f8fafc;
+      --muted: #cbd5e1;
+    }}
+    body {{ background: linear-gradient(180deg, #0f172a 0%, #111827 100%); color: var(--text); }}
+    .card, .accordion-item {{ background: rgba(17, 24, 39, 0.96); border: 1px solid var(--border); }}
+    .muted, .small {{ color: var(--muted) !important; }}
+    .metric-label {{ color: #dbeafe; font-size: .82rem; letter-spacing: .03em; text-transform: uppercase; }}
+    .metric-value {{ font-size: clamp(1.35rem, 3vw, 2rem); font-weight: 700; color: #fff; }}
+    .status-chip {{ border-radius: 999px; padding: .35rem .75rem; background: #172033; color: #fff; border: 1px solid var(--border); }}
+    .chart-wrap {{ height: 320px; }}
+    .accordion-button {{ background: #152033; color: #fff; }}
+    .accordion-button:not(.collapsed) {{ background: #1b2a44; color: #fff; box-shadow: none; }}
+    .accordion-button:focus {{ box-shadow: none; }}
+    .accordion-body {{ background: rgba(11, 18, 32, 0.92); color: #f8fafc; }}
+    .table-dark {{ --bs-table-bg: #0b1220; --bs-table-color: #f8fafc; --bs-table-border-color: #223147; }}
+    code {{ color: #f472b6; }}
+  </style>
+</head>
+<body>
+  <div class="container-fluid py-3 py-md-4">
+    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
+      <div>
+        <h1 class="h3 mb-1 text-white">EMU-2 Dashboard</h1>
+        <div class="muted">Mobile-friendly web view on port {port}</div>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <span class="status-chip" id="portText">Port: --</span>
+        <span class="status-chip" id="pricingText">Pricing: --</span>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Live Demand</div><div class="metric-value" id="demandValue">--</div></div></div></div>
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Current Price</div><div class="metric-value" id="priceValue">--</div></div></div></div>
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Current Period Usage</div><div class="metric-value" id="usageValue">--</div></div></div></div>
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Estimated Cost / Hour</div><div class="metric-value" id="costValue">--</div></div></div></div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-body d-flex flex-column flex-lg-row justify-content-between gap-3">
+        <div>
+          <div class="metric-label">System Status</div>
+          <div class="fs-5 text-white" id="statusText">Loading...</div>
+        </div>
+        <div class="row row-cols-2 row-cols-lg-4 g-3 flex-grow-1">
+          <div><div class="metric-label">Network</div><div id="networkValue">--</div></div>
+          <div><div class="metric-label">Link Strength</div><div id="signalValue">--</div></div>
+          <div><div class="metric-label">Last Update</div><div id="updatedValue">--</div></div>
+          <div><div class="metric-label">Local Meter Time</div><div id="localTimeValue">--</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center mb-3 gap-2">
+          <div>
+            <h2 class="h5 mb-1 text-white">Recent History</h2>
+            <div class="muted">Only confirmed readings are stored in the local SQLite database.</div>
+          </div>
+          <div class="muted">History DB: <code>data/energy_history.sqlite3</code></div>
+        </div>
+        <div class="chart-wrap"><canvas id="historyChart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="accordion" id="infoAccordion">
+      <div class="accordion-item mb-3">
+        <h2 class="accordion-header">
+          <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#detailsCollapse" aria-expanded="true">
+            Meter Details
+          </button>
+        </h2>
+        <div id="detailsCollapse" class="accordion-collapse collapse show" data-bs-parent="#infoAccordion">
+          <div class="accordion-body">
+            <div class="row g-3">
+              <div class="col-12 col-lg-6"><div class="metric-label">Model / Firmware</div><div id="firmwareValue">--</div></div>
+              <div class="col-12 col-lg-6"><div class="metric-label">Source Summary</div><div id="summaryText">--</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item mb-3">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#scheduleCollapse" aria-expanded="false">
+            Schedule Entries
+          </button>
+        </h2>
+        <div id="scheduleCollapse" class="accordion-collapse collapse" data-bs-parent="#infoAccordion">
+          <div class="accordion-body">
+            <div class="table-responsive">
+              <table class="table table-dark table-sm align-middle mb-0">
+                <tbody id="scheduleBody">
+                  <tr><td class="muted">No schedule data yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#notesCollapse" aria-expanded="false">
+            Notes
+          </button>
+        </h2>
+        <div id="notesCollapse" class="accordion-collapse collapse" data-bs-parent="#infoAccordion">
+          <div class="accordion-body">
+            <ul class="mb-0">
+              <li>Serial connection keeps retrying automatically.</li>
+              <li>Pricing source and COM port are restored from local config.</li>
+              <li>Unknown startup values are skipped and not written to history.</li>
+            </ul>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    let chart;
+
+    function ensureChart(labels, priceSeries, usageSeries) {{
+      const ctx = document.getElementById('historyChart');
+      if (!chart) {{
+        chart = new Chart(ctx, {{
+          type: 'line',
+          data: {{
+            labels,
+            datasets: [
+              {{
+                label: 'Price (c/kWh)',
+                data: priceSeries,
+                borderColor: '#38bdf8',
+                backgroundColor: 'rgba(56, 189, 248, 0.18)',
+                tension: 0.25,
+                yAxisID: 'y'
+              }},
+              {{
+                label: 'Usage (kWh)',
+                data: usageSeries,
+                borderColor: '#22c55e',
+                backgroundColor: 'rgba(34, 197, 94, 0.18)',
+                tension: 0.25,
+                yAxisID: 'y1'
+              }}
+            ]
+          }},
+          options: {{
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: {{ mode: 'index', intersect: false }},
+            plugins: {{
+              legend: {{ labels: {{ color: '#f8fafc' }} }}
+            }},
+            scales: {{
+              x: {{ ticks: {{ color: '#e2e8f0', maxTicksLimit: 8 }}, grid: {{ color: '#223147' }} }},
+              y: {{ ticks: {{ color: '#7dd3fc' }}, grid: {{ color: '#223147' }} }},
+              y1: {{ position: 'right', ticks: {{ color: '#86efac' }}, grid: {{ drawOnChartArea: false }} }}
+            }}
+          }}
+        }});
+      }} else {{
+        chart.data.labels = labels;
+        chart.data.datasets[0].data = priceSeries;
+        chart.data.datasets[1].data = usageSeries;
+        chart.update();
+      }}
+    }}
+
+    function updateSchedule(lines) {{
+      const body = document.getElementById('scheduleBody');
+      if (!lines.length) {{
+        body.innerHTML = '<tr><td class="muted">No schedule data yet.</td></tr>';
+        return;
+      }}
+      body.innerHTML = lines.slice(-8).map(line => `<tr><td>${{line}}</td></tr>`).join('');
+    }}
+
+    function applySnapshot(snapshot) {{
+      document.getElementById('statusText').textContent = snapshot.status_text || '--';
+      document.getElementById('portText').textContent = `Port: ${{snapshot.com_port || '--'}}`;
+      document.getElementById('pricingText').textContent = `Pricing: ${{snapshot.pricing_source || '--'}}`;
+      document.getElementById('demandValue').textContent = `${{snapshot.demand_kw.toFixed(3)}} kW`;
+      document.getElementById('priceValue').textContent = `${{snapshot.price_cents.toFixed(2)}} c/kWh`;
+      document.getElementById('usageValue').textContent = `${{snapshot.current_period_kwh.toFixed(3)}} kWh`;
+      document.getElementById('costValue').textContent = `$${{snapshot.cost_per_hour.toFixed(2)}}/hr`;
+      document.getElementById('networkValue').textContent = snapshot.network_status || '--';
+      document.getElementById('signalValue').textContent = snapshot.link_strength || '--';
+      document.getElementById('updatedValue').textContent = snapshot.last_update || '--';
+      document.getElementById('localTimeValue').textContent = snapshot.local_time || '--';
+      document.getElementById('firmwareValue').textContent = snapshot.firmware || '--';
+      document.getElementById('summaryText').textContent = `${{snapshot.com_port || '--'}} | ${{snapshot.pricing_source || '--'}} | ${{snapshot.price_cents.toFixed(2)}} c/kWh`;
+      updateSchedule(snapshot.schedule_lines || []);
+    }}
+
+    async function refreshData() {{
+      const [snapshotResp, historyResp] = await Promise.all([
+        fetch('/api/snapshot'),
+        fetch('/api/history')
+      ]);
+      const snapshot = await snapshotResp.json();
+      const history = await historyResp.json();
+      applySnapshot(snapshot);
+      ensureChart(history.labels, history.price_cents, history.usage_kwh);
+    }}
+
+    refreshData();
+    setInterval(refreshData, 5000);
+  </script>
+</body>
+</html>"""
+
+
+class DashboardWebServer:
+    def __init__(self, provider, port: int):
+        self.provider = provider
+        self.port = port
+        self.httpd = None
+        self.thread = None
+
+    def start(self):
+        provider = self.provider
+        port = self.port
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/":
+                    body = build_web_dashboard_html(port).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/html; charset=utf-8")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if self.path == "/api/snapshot":
+                    body = json.dumps(provider.get_snapshot()).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                if self.path == "/api/history":
+                    body = json.dumps(provider.get_history_payload()).encode("utf-8")
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json; charset=utf-8")
+                    self.send_header("Cache-Control", "no-store")
+                    self.send_header("Content-Length", str(len(body)))
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+
+                self.send_error(404)
+
+            def log_message(self, format, *args):
+                return
+
+        self.httpd = ThreadingHTTPServer(("0.0.0.0", self.port), Handler)
+        self.thread = threading.Thread(target=self.httpd.serve_forever, daemon=True)
+        self.thread.start()
+
+    def stop(self):
+        if self.httpd:
+            self.httpd.shutdown()
+            self.httpd.server_close()
+            self.httpd = None
 
 
 # ============================================================
@@ -478,8 +774,9 @@ class EmuSerialWorker(threading.Thread):
 # Main App
 # ============================================================
 class EmuDashboardApp:
-    def __init__(self, root):
+    def __init__(self, root, web_port=8000):
         self.root = root
+        self.web_port = web_port
         self.root.title(WINDOW_TITLE)
         self.root.geometry(WINDOW_SIZE)
         self.root.configure(bg="#0F172A")
@@ -490,6 +787,10 @@ class EmuDashboardApp:
         preferred_port = self.config_data.get("preferred_com_port") or COM_PORT
         self.com_port_var = tk.StringVar(value=preferred_port)
         self.available_ports = []
+        self.history_conn = self.init_history_store()
+        self.last_history_signature = None
+        self.last_history_save_time = ""
+        self.web_server = DashboardWebServer(self, self.web_port)
 
         self.data = {
             "device_mac": "",
@@ -497,10 +798,14 @@ class EmuDashboardApp:
             "utc_time": "",
             "local_time": "",
             "demand_kw": 0.0,
+            "demand_known": False,
             "price_cents": 0.0,
             "emu_price_cents": 0.0,
+            "emu_price_known": False,
             "comed_price_cents": 0.0,
+            "comed_price_known": False,
             "current_period_kwh": 0.0,
+            "current_period_known": False,
             "lifetime_kwh": 0.0,
             "summation_received_kwh": 0.0,
             "link_strength": "",
@@ -523,8 +828,10 @@ class EmuDashboardApp:
         self._build_ui()
         self._start_serial()
         self.refresh_ui()
+        self.refresh_history_chart()
         if self.pricing_source_var.get() == PRICING_SOURCE_COMED:
             self.fetch_comed_price()
+        self.web_server.start()
 
         self.root.after(100, self.process_queue)
         self.root.after(COMED_REFRESH_MS, self.schedule_comed_refresh)
@@ -545,7 +852,14 @@ class EmuDashboardApp:
         style.configure("CardLabel.TLabel", background="#111827", foreground="#E5E7EB", font=("Segoe UI", 10))
         style.configure("CardValue.TLabel", background="#111827", foreground="#F9FAFB", font=("Segoe UI", 18, "bold"))
         style.configure("TButton", font=("Segoe UI", 10))
-        style.configure("Dashboard.TCombobox", fieldbackground="#0B1220", background="#0B1220", foreground="#F9FAFB")
+        style.configure("Dashboard.TCombobox", fieldbackground="#F8FAFC", background="#F8FAFC", foreground="#111827", arrowcolor="#111827")
+        style.map(
+            "Dashboard.TCombobox",
+            fieldbackground=[("readonly", "#F8FAFC")],
+            foreground=[("readonly", "#111827")],
+            selectforeground=[("readonly", "#111827")],
+            selectbackground=[("readonly", "#E2E8F0")]
+        )
 
         outer = ttk.Frame(self.root)
         outer.pack(fill="both", expand=True, padx=14, pady=14)
@@ -681,6 +995,19 @@ class EmuDashboardApp:
         right_bottom = ttk.Frame(bottom)
         right_bottom.pack(side="left", fill="both", expand=True)
 
+        history_card = ttk.Frame(left_bottom, style="Card.TFrame")
+        history_card.pack(fill="x", pady=(0, 8))
+
+        ttk.Label(history_card, text="Recent History", style="CardLabel.TLabel").pack(anchor="w", padx=12, pady=(10, 6))
+
+        self.history_canvas = tk.Canvas(
+            history_card,
+            height=240,
+            bg="#0B1220",
+            highlightthickness=0
+        )
+        self.history_canvas.pack(fill="x", padx=12, pady=(0, 12))
+
         # Schedule panel
         schedule_card = ttk.Frame(left_bottom, style="Card.TFrame")
         schedule_card.pack(fill="both", expand=True, pady=(0, 8))
@@ -785,6 +1112,268 @@ class EmuDashboardApp:
                 "</Command>"
             )
 
+    def init_history_store(self):
+        os.makedirs(DATA_DIR, exist_ok=True)
+        conn = sqlite3.connect(HISTORY_DB_FILE)
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS readings (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sample_time TEXT NOT NULL,
+                pricing_source TEXT NOT NULL,
+                active_price_cents REAL NOT NULL,
+                emu_price_cents REAL NOT NULL,
+                comed_price_cents REAL NOT NULL,
+                demand_kw REAL NOT NULL,
+                current_period_kwh REAL NOT NULL,
+                local_meter_time TEXT
+            )
+            """
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_readings_sample_time ON readings(sample_time)"
+        )
+        conn.execute(
+            """
+            DELETE FROM readings
+            WHERE active_price_cents = 0
+              AND demand_kw = 0
+              AND current_period_kwh = 0
+              AND COALESCE(local_meter_time, '') = ''
+            """
+        )
+        conn.commit()
+        return conn
+
+    def maybe_record_history(self):
+        if not (
+            self.data["demand_known"]
+            and self.data["current_period_known"]
+            and self.get_active_price_known()
+        ):
+            return
+
+        sample_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        signature = (
+            self.pricing_source_var.get(),
+            round(self.data["price_cents"], 4),
+            round(self.data["emu_price_cents"], 4),
+            round(self.data["comed_price_cents"], 4),
+            round(self.data["demand_kw"], 4),
+            round(self.data["current_period_kwh"], 4),
+            self.data["local_time"],
+        )
+
+        if signature == self.last_history_signature:
+            return
+
+        self.last_history_signature = signature
+        self.last_history_save_time = sample_time
+
+        try:
+            self.history_conn.execute(
+                """
+                INSERT INTO readings (
+                    sample_time,
+                    pricing_source,
+                    active_price_cents,
+                    emu_price_cents,
+                    comed_price_cents,
+                    demand_kw,
+                    current_period_kwh,
+                    local_meter_time
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    sample_time,
+                    self.pricing_source_var.get(),
+                    self.data["price_cents"],
+                    self.data["emu_price_cents"],
+                    self.data["comed_price_cents"],
+                    self.data["demand_kw"],
+                    self.data["current_period_kwh"],
+                    self.data["local_time"],
+                ),
+            )
+            self.history_conn.execute(
+                """
+                DELETE FROM readings
+                WHERE id NOT IN (
+                    SELECT id FROM readings
+                    ORDER BY sample_time DESC, id DESC
+                    LIMIT ?
+                )
+                """,
+                (HISTORY_RETENTION_LIMIT,),
+            )
+            self.history_conn.commit()
+        except Exception as exc:
+            self.append_raw(f"[ERROR] History save failed: {exc}")
+            return
+
+        self.refresh_history_chart()
+
+    def load_recent_history(self, limit=240):
+        try:
+            rows = self.history_conn.execute(
+                """
+                SELECT sample_time, active_price_cents, current_period_kwh
+                FROM readings
+                ORDER BY sample_time DESC, id DESC
+                LIMIT ?
+                """,
+                (limit,),
+            ).fetchall()
+        except Exception as exc:
+            self.append_raw(f"[ERROR] History load failed: {exc}")
+            return []
+
+        return list(reversed(rows))
+
+    def get_snapshot(self):
+        fw = self.data["fw_version"]
+        model = self.data["model_id"]
+        firmware = f"{model} / {fw}" if (fw or model) else "-"
+        price_cents = self.get_active_price_cents()
+
+        return {
+            "com_port": self.com_port_var.get(),
+            "pricing_source": self.pricing_source_var.get(),
+            "demand_kw": float(self.data["demand_kw"]),
+            "price_cents": float(price_cents),
+            "current_period_kwh": float(self.data["current_period_kwh"]),
+            "lifetime_kwh": float(self.data["lifetime_kwh"]),
+            "cost_per_hour": float(self.data["demand_kw"] * (price_cents / 100.0)),
+            "network_status": self.data["network_status"] or "-",
+            "link_strength": format_link_strength(self.data["link_strength"]),
+            "last_update": self.data["last_update"] or "-",
+            "local_time": self.data["local_time"] or "-",
+            "firmware": firmware,
+            "schedule_lines": list(self.data["schedule_lines"]),
+            "status_text": self.status_var.get(),
+        }
+
+    def get_history_payload(self, limit=240):
+        rows = self.load_recent_history(limit=limit)
+        return {
+            "labels": [row[0][11:16] for row in rows],
+            "price_cents": [row[1] for row in rows],
+            "usage_kwh": [row[2] for row in rows],
+        }
+
+    def get_active_price_known(self) -> bool:
+        source = self.pricing_source_var.get()
+        if source == PRICING_SOURCE_EMU:
+            return self.data["emu_price_known"]
+        if source == PRICING_SOURCE_COMED:
+            return self.data["comed_price_known"]
+        return False
+
+    def refresh_history_chart(self):
+        if not hasattr(self, "history_canvas"):
+            return
+
+        canvas = self.history_canvas
+        canvas.update_idletasks()
+        width = max(canvas.winfo_width(), 320)
+        height = max(canvas.winfo_height(), 240)
+        canvas.delete("all")
+
+        rows = self.load_recent_history()
+        if len(rows) < 2:
+            canvas.create_text(
+                width / 2,
+                height / 2,
+                text="History will appear here after a few samples are saved.",
+                fill="#94A3B8",
+                font=("Segoe UI", 11)
+            )
+            return
+
+        pad_left = 48
+        pad_right = 18
+        pad_top = 20
+        pad_bottom = 34
+        plot_width = width - pad_left - pad_right
+        plot_height = height - pad_top - pad_bottom
+
+        canvas.create_rectangle(
+            pad_left,
+            pad_top,
+            pad_left + plot_width,
+            pad_top + plot_height,
+            outline="#334155"
+        )
+
+        price_values = [row[1] for row in rows]
+        usage_values = [row[2] for row in rows]
+
+        price_min = min(price_values)
+        price_max = max(price_values)
+        usage_min = min(usage_values)
+        usage_max = max(usage_values)
+
+        if price_min == price_max:
+            price_min -= 1.0
+            price_max += 1.0
+        if usage_min == usage_max:
+            usage_min -= 0.1
+            usage_max += 0.1
+
+        for frac in (0.0, 0.5, 1.0):
+            y = pad_top + plot_height - (plot_height * frac)
+            canvas.create_line(pad_left, y, pad_left + plot_width, y, fill="#1E293B")
+
+        def series_points(values, low, high):
+            points = []
+            span = max(high - low, 0.0001)
+            count = max(len(values) - 1, 1)
+            for idx, value in enumerate(values):
+                x = pad_left + (plot_width * idx / count)
+                y = pad_top + plot_height - (((value - low) / span) * plot_height)
+                points.extend([x, y])
+            return points
+
+        price_points = series_points(price_values, price_min, price_max)
+        usage_points = series_points(usage_values, usage_min, usage_max)
+
+        canvas.create_line(*price_points, fill="#38BDF8", width=2, smooth=True)
+        canvas.create_line(*usage_points, fill="#22C55E", width=2, smooth=True)
+
+        canvas.create_text(
+            pad_left,
+            height - 14,
+            text=rows[0][0][11:16],
+            anchor="w",
+            fill="#94A3B8",
+            font=("Segoe UI", 9)
+        )
+        canvas.create_text(
+            pad_left + plot_width,
+            height - 14,
+            text=rows[-1][0][11:16],
+            anchor="e",
+            fill="#94A3B8",
+            font=("Segoe UI", 9)
+        )
+
+        canvas.create_text(
+            pad_left,
+            8,
+            text=f"Price {price_values[-1]:.2f} ¢/kWh",
+            anchor="w",
+            fill="#38BDF8",
+            font=("Segoe UI", 10, "bold")
+        )
+        canvas.create_text(
+            width - pad_right,
+            8,
+            text=f"Usage {usage_values[-1]:.3f} kWh",
+            anchor="e",
+            fill="#22C55E",
+            font=("Segoe UI", 10, "bold")
+        )
+
     def append_raw(self, text: str):
         self.raw_text.config(state="normal")
         self.raw_text.insert("end", text + "\n")
@@ -825,14 +1414,17 @@ class EmuDashboardApp:
                 elif msg_type == "xml":
                     self.handle_xml(payload)
                     self.refresh_ui()
+                    self.maybe_record_history()
 
                 elif msg_type == "comed_price":
                     self.comed_fetch_in_progress = False
                     price_cents, price_time = payload
                     self.data["comed_price_cents"] = price_cents
+                    self.data["comed_price_known"] = True
                     self.data["comed_price_time"] = price_time
                     self.data["last_update"] = price_time
                     self.refresh_ui()
+                    self.maybe_record_history()
 
                 elif msg_type == "comed_error":
                     self.comed_fetch_in_progress = False
@@ -875,6 +1467,7 @@ class EmuDashboardApp:
                 txt("Multiplier"),
                 txt("Divisor")
             )
+            self.data["demand_known"] = True
 
         elif tag == "PriceCluster":
             self.data["device_mac"] = txt("DeviceMacId")
@@ -883,6 +1476,7 @@ class EmuDashboardApp:
                 txt("Price"),
                 txt("TrailingDigits")
             )
+            self.data["emu_price_known"] = True
             self.data["price_start"] = fmt_local_time_from_zigbee(txt("StartTime"))
             try:
                 duration_minutes = parse_hex_int(txt("Duration"))
@@ -912,6 +1506,7 @@ class EmuDashboardApp:
                 txt("Multiplier"),
                 txt("Divisor")
             )
+            self.data["current_period_known"] = True
 
         elif tag == "ScheduleInfo":
             line = (
@@ -1027,15 +1622,256 @@ class EmuDashboardApp:
 
     def on_close(self):
         self.stop_serial_worker()
+        if self.web_server:
+            self.web_server.stop()
+        try:
+            if self.history_conn:
+                self.history_conn.close()
+        except Exception:
+            pass
         self.root.destroy()
+
+
+class SimpleVar:
+    def __init__(self, value=""):
+        self.value = value
+
+    def get(self):
+        return self.value
+
+    def set(self, value):
+        self.value = value
+
+
+class HeadlessDashboardApp:
+    def __init__(self, web_port=8000):
+        self.web_port = web_port
+        self.queue = queue.Queue()
+        self.worker = None
+        self.stop_event = threading.Event()
+        self.config_data = load_app_config()
+        preferred_port = self.config_data.get("preferred_com_port") or COM_PORT
+        self.com_port_var = SimpleVar(preferred_port)
+        self.available_ports = []
+        self.history_conn = self.init_history_store()
+        self.last_history_signature = None
+        self.last_history_save_time = ""
+        self.status_var = SimpleVar("Starting...")
+        self.web_server = DashboardWebServer(self, self.web_port)
+
+        self.data = {
+            "device_mac": "",
+            "meter_mac": METER_MAC_ID,
+            "utc_time": "",
+            "local_time": "",
+            "demand_kw": 0.0,
+            "demand_known": False,
+            "price_cents": 0.0,
+            "emu_price_cents": 0.0,
+            "emu_price_known": False,
+            "comed_price_cents": 0.0,
+            "comed_price_known": False,
+            "current_period_kwh": 0.0,
+            "current_period_known": False,
+            "lifetime_kwh": 0.0,
+            "summation_received_kwh": 0.0,
+            "link_strength": "",
+            "network_status": "",
+            "fw_version": "",
+            "model_id": "",
+            "last_update": "",
+            "price_start": "",
+            "price_duration_min": "",
+            "comed_price_time": "",
+            "schedule_lines": [],
+        }
+
+        preferred_pricing_source = self.config_data.get("preferred_pricing_source") or PRICING_SOURCE_NONE
+        if preferred_pricing_source not in [PRICING_SOURCE_NONE, PRICING_SOURCE_EMU, PRICING_SOURCE_COMED]:
+            preferred_pricing_source = PRICING_SOURCE_NONE
+        self.pricing_source_var = SimpleVar(preferred_pricing_source)
+        self.comed_fetch_in_progress = False
+
+        self._start_serial()
+        self.refresh_ui()
+        if self.pricing_source_var.get() == PRICING_SOURCE_COMED:
+            self.fetch_comed_price()
+        self.web_server.start()
+
+        self.process_thread = threading.Thread(target=self.process_queue_loop, daemon=True)
+        self.process_thread.start()
+        self.comed_thread = threading.Thread(target=self.comed_refresh_loop, daemon=True)
+        self.comed_thread.start()
+
+    def _delayed_call(self, delay_sec, func):
+        def runner():
+            time.sleep(delay_sec)
+            if not self.stop_event.is_set():
+                func()
+        threading.Thread(target=runner, daemon=True).start()
+
+    def _start_serial(self):
+        self.stop_serial_worker()
+        self.worker = EmuSerialWorker(self.com_port_var.get(), BAUD_RATE, METER_MAC_ID, self.queue)
+        self.worker.start()
+        self.status_var.set(f"Waiting for {self.com_port_var.get()}...")
+
+    def stop_serial_worker(self):
+        if self.worker:
+            self.worker.stop()
+            self.worker = None
+
+    def schedule_initial_queries(self):
+        self._delayed_call(1.2, self.send_network_info)
+        self._delayed_call(1.8, lambda: self.send_named_command("get_device_info", include_meter=False))
+        self._delayed_call(2.4, lambda: self.send_named_command("get_time"))
+        self._delayed_call(3.0, lambda: self.send_named_command("get_current_price", refresh="Y"))
+        self._delayed_call(3.6, lambda: self.send_named_command("get_instantaneous_demand", refresh="Y"))
+        self._delayed_call(4.2, lambda: self.send_named_command("get_current_summation_delivered", refresh="Y"))
+        self._delayed_call(4.8, lambda: self.send_named_command("get_current_period_usage"))
+        self._delayed_call(5.4, self.send_schedule)
+
+    def send_named_command(self, name, include_meter=True, refresh=None, extra_tags=None):
+        if self.worker:
+            self.worker.send_command(
+                name=name,
+                include_meter=include_meter,
+                refresh=refresh,
+                extra_tags=extra_tags
+            )
+
+    def send_network_info(self):
+        if self.worker:
+            self.worker.send_xml(
+                "<Command>\n"
+                "  <Name>get_network_info</Name>\n"
+                "</Command>"
+            )
+
+    def send_schedule(self):
+        if self.worker:
+            self.worker.send_xml(
+                "<Command>\n"
+                "  <Name>get_schedule</Name>\n"
+                "</Command>"
+            )
+
+    def append_raw(self, text: str):
+        print(text)
+
+    def refresh_history_chart(self):
+        return
+
+    def set_schedule_text(self):
+        return
+
+    def refresh_ui(self):
+        demand_kw = self.data["demand_kw"]
+        price_cents = self.get_active_price_cents()
+        self.data["price_cents"] = price_cents
+        cost_per_hour = demand_kw * (price_cents / 100.0)
+        self.status_var.set(
+            f"{self.com_port_var.get()} | "
+            f"{self.data['demand_kw']:.3f} kW | "
+            f"{self.pricing_source_var.get()} | "
+            f"{self.data['price_cents']:.2f} ¢/kWh | "
+            f"${cost_per_hour:.2f}/hr"
+        )
+
+    def process_queue_loop(self):
+        while not self.stop_event.is_set():
+            try:
+                msg_type, payload = self.queue.get(timeout=0.1)
+            except queue.Empty:
+                continue
+
+            if msg_type == "status":
+                self.status_var.set(payload)
+                self.append_raw(f"[STATUS] {payload}")
+            elif msg_type == "connected":
+                self.status_var.set(payload)
+                self.append_raw(f"[STATUS] {payload}")
+                self.schedule_initial_queries()
+            elif msg_type == "error":
+                self.status_var.set(payload)
+                self.append_raw(f"[ERROR] {payload}")
+            elif msg_type == "sent":
+                self.append_raw(f"[SENT]\n{payload}\n")
+            elif msg_type == "raw":
+                self.append_raw(payload)
+            elif msg_type == "xml":
+                self.handle_xml(payload)
+                self.refresh_ui()
+                self.maybe_record_history()
+            elif msg_type == "comed_price":
+                self.comed_fetch_in_progress = False
+                price_cents, price_time = payload
+                self.data["comed_price_cents"] = price_cents
+                self.data["comed_price_time"] = price_time
+                self.data["last_update"] = price_time
+                self.refresh_ui()
+                self.maybe_record_history()
+            elif msg_type == "comed_error":
+                self.comed_fetch_in_progress = False
+                self.append_raw(f"[ERROR] {payload}")
+                self.refresh_ui()
+
+    def comed_refresh_loop(self):
+        while not self.stop_event.is_set():
+            time.sleep(COMED_REFRESH_MS / 1000.0)
+            if self.stop_event.is_set():
+                break
+            if self.pricing_source_var.get() == PRICING_SOURCE_COMED:
+                self.fetch_comed_price()
+
+    def stop(self):
+        self.stop_event.set()
+        self.stop_serial_worker()
+        if self.web_server:
+            self.web_server.stop()
+        try:
+            if self.history_conn:
+                self.history_conn.close()
+        except Exception:
+            pass
+
+
+for _shared_method in (
+    "init_history_store",
+    "maybe_record_history",
+    "load_recent_history",
+    "get_snapshot",
+    "get_history_payload",
+    "get_active_price_known",
+    "handle_xml",
+    "get_active_price_cents",
+    "fetch_comed_price",
+):
+    setattr(HeadlessDashboardApp, _shared_method, getattr(EmuDashboardApp, _shared_method))
 
 
 # ============================================================
 # Entrypoint
 # ============================================================
 def main():
+    parser = argparse.ArgumentParser(description="EMU-2 Smart Meter Dashboard")
+    parser.add_argument("--headless", action="store_true", help="Run without the Tk GUI")
+    parser.add_argument("--port", type=int, default=8000, help="Web server port (default: 8000)")
+    args = parser.parse_args()
+
+    if args.headless:
+        app = HeadlessDashboardApp(web_port=args.port)
+        print(f"Headless dashboard running on http://127.0.0.1:{args.port}")
+        try:
+            while True:
+                time.sleep(1)
+        except KeyboardInterrupt:
+            app.stop()
+        return
+
     root = tk.Tk()
-    app = EmuDashboardApp(root)
+    app = EmuDashboardApp(root, web_port=args.port)
+    print(f"Web dashboard running on http://127.0.0.1:{args.port}")
     root.mainloop()
 
 
