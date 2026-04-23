@@ -26,7 +26,7 @@ SERIAL_RETRY_DELAY_SEC = 3
 METER_MAC_ID = "0x0013500500477542"
 
 WINDOW_TITLE = "EMU-2 Energy Dashboard"
-WINDOW_SIZE = "1260x760"
+WINDOW_SIZE = "1360x960"
 
 # Gauge ranges
 MAX_DEMAND_KW = 12.0          # adjust if you want
@@ -522,6 +522,9 @@ class EmuDashboardApp:
 
         self._build_ui()
         self._start_serial()
+        self.refresh_ui()
+        if self.pricing_source_var.get() == PRICING_SOURCE_COMED:
+            self.fetch_comed_price()
 
         self.root.after(100, self.process_queue)
         self.root.after(COMED_REFRESH_MS, self.schedule_comed_refresh)
