@@ -504,7 +504,10 @@ class EmuDashboardApp:
             "schedule_lines": [],
         }
 
-        self.pricing_source_var = tk.StringVar(value=PRICING_SOURCE_NONE)
+        preferred_pricing_source = self.config_data.get("preferred_pricing_source") or PRICING_SOURCE_NONE
+        if preferred_pricing_source not in [PRICING_SOURCE_NONE, PRICING_SOURCE_EMU, PRICING_SOURCE_COMED]:
+            preferred_pricing_source = PRICING_SOURCE_NONE
+        self.pricing_source_var = tk.StringVar(value=preferred_pricing_source)
         self.comed_fetch_in_progress = False
 
         self._build_ui()
@@ -965,6 +968,8 @@ class EmuDashboardApp:
         return 0.0
 
     def on_pricing_source_changed(self, _event=None):
+        self.config_data["preferred_pricing_source"] = self.pricing_source_var.get()
+        save_app_config(self.config_data)
         if self.pricing_source_var.get() == PRICING_SOURCE_COMED:
             self.fetch_comed_price()
         self.refresh_ui()
