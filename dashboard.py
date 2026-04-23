@@ -80,7 +80,17 @@ def zigbee_time_to_unix(zigbee_hex: str) -> int:
 def fmt_local_time_from_zigbee(zigbee_hex: str) -> str:
     try:
         unix_ts = zigbee_time_to_unix(zigbee_hex)
-        return time.strftime("%Y-%m-%d %I:%M:%S %p", time.localtime(unix_ts))
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(unix_ts))
+    except Exception:
+        return str(zigbee_hex)
+
+
+def fmt_meter_local_time_from_zigbee(zigbee_hex: str) -> str:
+    try:
+        unix_ts = zigbee_time_to_unix(zigbee_hex)
+        # LocalTime from the EMU-2 is already adjusted to local wall time,
+        # so display it directly without applying the PC timezone offset again.
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(unix_ts))
     except Exception:
         return str(zigbee_hex)
 
@@ -833,7 +843,7 @@ class EmuDashboardApp:
 
     def handle_xml(self, elem: ET.Element):
         tag = elem.tag
-        self.data["last_update"] = time.strftime("%Y-%m-%d %I:%M:%S %p")
+        self.data["last_update"] = time.strftime("%Y-%m-%d %H:%M:%S")
 
         def txt(name, default=""):
             child = elem.find(name)
@@ -852,7 +862,7 @@ class EmuDashboardApp:
 
         elif tag == "TimeCluster":
             self.data["utc_time"] = fmt_local_time_from_zigbee(txt("UTCTime"))
-            self.data["local_time"] = fmt_local_time_from_zigbee(txt("LocalTime"))
+            self.data["local_time"] = fmt_meter_local_time_from_zigbee(txt("LocalTime"))
 
         elif tag == "InstantaneousDemand":
             self.data["device_mac"] = txt("DeviceMacId")
@@ -1001,7 +1011,7 @@ class EmuDashboardApp:
                 price_cents = float(latest["price"])
                 millis_utc = int(latest["millisUTC"])
                 price_time = time.strftime(
-                    "%Y-%m-%d %I:%M:%S %p",
+                    "%Y-%m-%d %H:%M:%S",
                     time.localtime(millis_utc / 1000.0)
                 )
                 self.queue.put(("comed_price", (price_cents, price_time)))
