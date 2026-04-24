@@ -307,28 +307,36 @@ def build_web_dashboard_html(port: int) -> str:
     let chart;
 
     function ensureChart(labels, priceSeries, usageSeries) {{
-      const ctx = document.getElementById('historyChart');
+      const canvas = document.getElementById('historyChart');
+      const ctx = canvas.getContext('2d');
+      const safeLabels = Array.isArray(labels) ? labels : [];
+      const safePrice = Array.isArray(priceSeries) ? priceSeries.map(Number) : [];
+      const safeUsage = Array.isArray(usageSeries) ? usageSeries.map(Number) : [];
       if (!chart) {{
         chart = new Chart(ctx, {{
           type: 'line',
           data: {{
-            labels,
+            labels: safeLabels,
             datasets: [
               {{
                 label: 'Price (c/kWh)',
-                data: priceSeries,
+                data: safePrice,
                 borderColor: '#38bdf8',
                 backgroundColor: 'rgba(56, 189, 248, 0.18)',
                 tension: 0.25,
-                yAxisID: 'y'
+                yAxisID: 'y',
+                pointRadius: 2,
+                borderWidth: 2
               }},
               {{
                 label: 'Usage (kWh)',
-                data: usageSeries,
+                data: safeUsage,
                 borderColor: '#22c55e',
                 backgroundColor: 'rgba(34, 197, 94, 0.18)',
                 tension: 0.25,
-                yAxisID: 'y1'
+                yAxisID: 'y1',
+                pointRadius: 2,
+                borderWidth: 2
               }}
             ]
           }},
@@ -340,16 +348,32 @@ def build_web_dashboard_html(port: int) -> str:
               legend: {{ labels: {{ color: '#f8fafc' }} }}
             }},
             scales: {{
-              x: {{ ticks: {{ color: '#e2e8f0', maxTicksLimit: 8 }}, grid: {{ color: '#223147' }} }},
-              y: {{ ticks: {{ color: '#7dd3fc' }}, grid: {{ color: '#223147' }} }},
-              y1: {{ position: 'right', ticks: {{ color: '#86efac' }}, grid: {{ drawOnChartArea: false }} }}
+              x: {{
+                type: 'category',
+                ticks: {{ color: '#e2e8f0', maxTicksLimit: 8 }},
+                grid: {{ color: '#223147' }}
+              }},
+              y: {{
+                type: 'linear',
+                position: 'left',
+                beginAtZero: false,
+                ticks: {{ color: '#7dd3fc' }},
+                grid: {{ color: '#223147' }}
+              }},
+              y1: {{
+                type: 'linear',
+                position: 'right',
+                beginAtZero: false,
+                ticks: {{ color: '#86efac' }},
+                grid: {{ drawOnChartArea: false }}
+              }}
             }}
           }}
         }});
       }} else {{
-        chart.data.labels = labels;
-        chart.data.datasets[0].data = priceSeries;
-        chart.data.datasets[1].data = usageSeries;
+        chart.data.labels = safeLabels;
+        chart.data.datasets[0].data = safePrice;
+        chart.data.datasets[1].data = safeUsage;
         chart.update();
       }}
     }}
@@ -1257,8 +1281,8 @@ class EmuDashboardApp:
         rows = self.load_recent_history(limit=limit)
         return {
             "labels": [row[0][11:16] for row in rows],
-            "price_cents": [row[1] for row in rows],
-            "usage_kwh": [row[2] for row in rows],
+            "price_cents": [float(row[1]) for row in rows],
+            "usage_kwh": [float(row[2]) for row in rows],
         }
 
     def get_active_price_known(self) -> bool:
