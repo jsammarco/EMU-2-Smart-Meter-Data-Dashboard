@@ -241,7 +241,6 @@ def build_web_dashboard_html(port: int) -> str:
             <h2 class="h5 mb-1 text-white">Recent History</h2>
             <div class="muted">Only confirmed readings are stored in the local SQLite database.</div>
           </div>
-          <div class="muted">History DB: <code>data/energy_history.sqlite3</code></div>
         </div>
         <div class="chart-wrap"><canvas id="historyChart"></canvas></div>
       </div>
@@ -283,22 +282,6 @@ def build_web_dashboard_html(port: int) -> str:
         </div>
       </div>
 
-      <div class="accordion-item">
-        <h2 class="accordion-header">
-          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#notesCollapse" aria-expanded="false">
-            Notes
-          </button>
-        </h2>
-        <div id="notesCollapse" class="accordion-collapse collapse" data-bs-parent="#infoAccordion">
-          <div class="accordion-body">
-            <ul class="mb-0">
-              <li>Serial connection keeps retrying automatically.</li>
-              <li>Pricing source and COM port are restored from local config.</li>
-              <li>Unknown startup values are skipped and not written to history.</li>
-            </ul>
-          </div>
-        </div>
-      </div>
     </div>
   </div>
 
