@@ -200,7 +200,7 @@ def build_web_dashboard_html(port: int) -> str:
   </style>
 </head>
 <body>
-  <div class="container-fluid py-3 py-md-4">
+  <div class="container py-3 py-md-4" style="max-width: 1440px;">
     <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
       <div>
         <h1 class="h3 mb-1 text-white">EMU-2 Dashboard</h1>
@@ -811,6 +811,7 @@ class EmuDashboardApp:
         preferred_port = self.config_data.get("preferred_com_port") or COM_PORT
         self.com_port_var = tk.StringVar(value=preferred_port)
         self.available_ports = []
+        self.history_lock = threading.Lock()
         self.history_conn = self.init_history_store()
         self.last_history_signature = None
         self.last_history_save_time = ""
@@ -1138,35 +1139,36 @@ class EmuDashboardApp:
 
     def init_history_store(self):
         os.makedirs(DATA_DIR, exist_ok=True)
-        conn = sqlite3.connect(HISTORY_DB_FILE)
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS readings (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                sample_time TEXT NOT NULL,
-                pricing_source TEXT NOT NULL,
-                active_price_cents REAL NOT NULL,
-                emu_price_cents REAL NOT NULL,
-                comed_price_cents REAL NOT NULL,
-                demand_kw REAL NOT NULL,
-                current_period_kwh REAL NOT NULL,
-                local_meter_time TEXT
+        conn = sqlite3.connect(HISTORY_DB_FILE, check_same_thread=False)
+        with self.history_lock:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS readings (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    sample_time TEXT NOT NULL,
+                    pricing_source TEXT NOT NULL,
+                    active_price_cents REAL NOT NULL,
+                    emu_price_cents REAL NOT NULL,
+                    comed_price_cents REAL NOT NULL,
+                    demand_kw REAL NOT NULL,
+                    current_period_kwh REAL NOT NULL,
+                    local_meter_time TEXT
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            "CREATE INDEX IF NOT EXISTS idx_readings_sample_time ON readings(sample_time)"
-        )
-        conn.execute(
-            """
-            DELETE FROM readings
-            WHERE active_price_cents = 0
-              AND demand_kw = 0
-              AND current_period_kwh = 0
-              AND COALESCE(local_meter_time, '') = ''
-            """
-        )
-        conn.commit()
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_readings_sample_time ON readings(sample_time)"
+            )
+            conn.execute(
+                """
+                DELETE FROM readings
+                WHERE active_price_cents = 0
+                  AND demand_kw = 0
+                  AND current_period_kwh = 0
+                  AND COALESCE(local_meter_time, '') = ''
+                """
+            )
+            conn.commit()
         return conn
 
     def maybe_record_history(self):
@@ -1195,42 +1197,43 @@ class EmuDashboardApp:
         self.last_history_save_time = sample_time
 
         try:
-            self.history_conn.execute(
-                """
-                INSERT INTO readings (
-                    sample_time,
-                    pricing_source,
-                    active_price_cents,
-                    emu_price_cents,
-                    comed_price_cents,
-                    demand_kw,
-                    current_period_kwh,
-                    local_meter_time
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    sample_time,
-                    self.pricing_source_var.get(),
-                    self.data["price_cents"],
-                    self.data["emu_price_cents"],
-                    self.data["comed_price_cents"],
-                    self.data["demand_kw"],
-                    self.data["current_period_kwh"],
-                    self.data["local_time"],
-                ),
-            )
-            self.history_conn.execute(
-                """
-                DELETE FROM readings
-                WHERE id NOT IN (
-                    SELECT id FROM readings
-                    ORDER BY sample_time DESC, id DESC
-                    LIMIT ?
+            with self.history_lock:
+                self.history_conn.execute(
+                    """
+                    INSERT INTO readings (
+                        sample_time,
+                        pricing_source,
+                        active_price_cents,
+                        emu_price_cents,
+                        comed_price_cents,
+                        demand_kw,
+                        current_period_kwh,
+                        local_meter_time
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        sample_time,
+                        self.pricing_source_var.get(),
+                        self.data["price_cents"],
+                        self.data["emu_price_cents"],
+                        self.data["comed_price_cents"],
+                        self.data["demand_kw"],
+                        self.data["current_period_kwh"],
+                        self.data["local_time"],
+                    ),
                 )
-                """,
-                (HISTORY_RETENTION_LIMIT,),
-            )
-            self.history_conn.commit()
+                self.history_conn.execute(
+                    """
+                    DELETE FROM readings
+                    WHERE id NOT IN (
+                        SELECT id FROM readings
+                        ORDER BY sample_time DESC, id DESC
+                        LIMIT ?
+                    )
+                    """,
+                    (HISTORY_RETENTION_LIMIT,),
+                )
+                self.history_conn.commit()
         except Exception as exc:
             self.append_raw(f"[ERROR] History save failed: {exc}")
             return
@@ -1239,15 +1242,16 @@ class EmuDashboardApp:
 
     def load_recent_history(self, limit=240):
         try:
-            rows = self.history_conn.execute(
-                """
-                SELECT sample_time, active_price_cents, current_period_kwh
-                FROM readings
-                ORDER BY sample_time DESC, id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            ).fetchall()
+            with self.history_lock:
+                rows = self.history_conn.execute(
+                    """
+                    SELECT sample_time, active_price_cents, current_period_kwh
+                    FROM readings
+                    ORDER BY sample_time DESC, id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                ).fetchall()
         except Exception as exc:
             self.append_raw(f"[ERROR] History load failed: {exc}")
             return []
@@ -1677,6 +1681,7 @@ class HeadlessDashboardApp:
         preferred_port = self.config_data.get("preferred_com_port") or COM_PORT
         self.com_port_var = SimpleVar(preferred_port)
         self.available_ports = []
+        self.history_lock = threading.Lock()
         self.history_conn = self.init_history_store()
         self.last_history_signature = None
         self.last_history_save_time = ""
