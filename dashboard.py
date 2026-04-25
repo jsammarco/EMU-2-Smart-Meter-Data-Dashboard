@@ -1082,7 +1082,6 @@ class EmuDashboardApp:
     def maybe_record_history(self):
         if not (
             self.data["demand_known"]
-            and self.data["current_period_known"]
             and self.get_active_price_known()
         ):
             return
@@ -1153,7 +1152,7 @@ class EmuDashboardApp:
             with self.history_lock:
                 rows = self.history_conn.execute(
                     """
-                    SELECT sample_time, active_price_cents, current_period_kwh
+                    SELECT sample_time, active_price_cents, demand_kw
                     FROM readings
                     ORDER BY sample_time DESC, id DESC
                     LIMIT ?
@@ -1195,7 +1194,7 @@ class EmuDashboardApp:
         return {
             "labels": [row[0][11:16] for row in rows],
             "price_cents": [float(row[1]) for row in rows],
-            "usage_kwh": [float(row[2]) for row in rows],
+            "demand_kw": [float(row[2]) for row in rows],
         }
 
     def get_active_price_known(self) -> bool:
@@ -1243,19 +1242,19 @@ class EmuDashboardApp:
         )
 
         price_values = [row[1] for row in rows]
-        usage_values = [row[2] for row in rows]
+        demand_values = [row[2] for row in rows]
 
         price_min = min(price_values)
         price_max = max(price_values)
-        usage_min = min(usage_values)
-        usage_max = max(usage_values)
+        demand_min = min(demand_values)
+        demand_max = max(demand_values)
 
         if price_min == price_max:
             price_min -= 1.0
             price_max += 1.0
-        if usage_min == usage_max:
-            usage_min -= 0.1
-            usage_max += 0.1
+        if demand_min == demand_max:
+            demand_min -= 0.1
+            demand_max += 0.1
 
         for frac in (0.0, 0.5, 1.0):
             y = pad_top + plot_height - (plot_height * frac)
@@ -1272,10 +1271,10 @@ class EmuDashboardApp:
             return points
 
         price_points = series_points(price_values, price_min, price_max)
-        usage_points = series_points(usage_values, usage_min, usage_max)
+        demand_points = series_points(demand_values, demand_min, demand_max)
 
         canvas.create_line(*price_points, fill="#38BDF8", width=2, smooth=True)
-        canvas.create_line(*usage_points, fill="#22C55E", width=2, smooth=True)
+        canvas.create_line(*demand_points, fill="#22C55E", width=2, smooth=True)
 
         canvas.create_text(
             pad_left,
@@ -1305,7 +1304,7 @@ class EmuDashboardApp:
         canvas.create_text(
             width - pad_right,
             8,
-            text=f"Usage {usage_values[-1]:.3f} kWh",
+            text=f"Demand {demand_values[-1]:.3f} kW",
             anchor="e",
             fill="#22C55E",
             font=("Segoe UI", 10, "bold")

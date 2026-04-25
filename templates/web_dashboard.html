@@ -243,12 +243,12 @@
       }
     }
 
-    function ensureChart(labels, priceSeries, usageSeries) {
+    function ensureChart(labels, priceSeries, demandSeries) {
       const canvas = document.getElementById('historyChart');
       const ctx = canvas.getContext('2d');
       const safeLabels = Array.isArray(labels) ? labels : [];
       const safePrice = Array.isArray(priceSeries) ? priceSeries.map(Number) : [];
-      const safeUsage = Array.isArray(usageSeries) ? usageSeries.map(Number) : [];
+      const safeDemand = Array.isArray(demandSeries) ? demandSeries.map(Number) : [];
       if (!chart) {
         chart = new Chart(ctx, {
           type: 'line',
@@ -266,8 +266,8 @@
                 borderWidth: 2
               },
               {
-                label: 'Usage (kWh)',
-                data: safeUsage,
+                label: 'Demand (kW)',
+                data: safeDemand,
                 borderColor: '#22c55e',
                 backgroundColor: 'rgba(34, 197, 94, 0.18)',
                 tension: 0.25,
@@ -310,7 +310,7 @@
       } else {
         chart.data.labels = safeLabels;
         chart.data.datasets[0].data = safePrice;
-        chart.data.datasets[1].data = safeUsage;
+        chart.data.datasets[1].data = safeDemand;
         chart.update();
       }
     }
@@ -350,7 +350,7 @@
       const snapshot = await snapshotResp.json();
       const history = await historyResp.json();
       applySnapshot(snapshot);
-      ensureChart(history.labels, history.price_cents, history.usage_kwh);
+      ensureChart(history.labels, history.price_cents, history.demand_kw);
     }
 
     document.getElementById('wakeLockButton').addEventListener('click', toggleWakeLock);
