@@ -36,6 +36,7 @@ WINDOW_SIZE = "1360x960"
 
 # Gauge ranges
 MAX_DEMAND_KW = 12.0          # adjust if you want
+MIN_PRICE_CENTS = -5.0        # ComEd can occasionally go negative
 MAX_PRICE_CENTS = 30.0        # adjust if you want
 
 PRICING_SOURCE_NONE = "No Pricing Source"
@@ -933,7 +934,7 @@ class EmuDashboardApp:
             top,
             title="Current Price",
             units="¢/kWh",
-            min_value=0,
+            min_value=MIN_PRICE_CENTS,
             max_value=MAX_PRICE_CENTS
         )
         self.price_gauge.pack(side="left", padx=(0, 12))
