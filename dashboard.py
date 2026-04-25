@@ -1,5 +1,6 @@
 import argparse
 import json
+import logging
 import math
 import os
 import queue
@@ -9,6 +10,7 @@ import threading
 import time
 import tkinter as tk
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from logging.handlers import RotatingFileHandler
 from tkinter import ttk, scrolledtext, messagebox
 from urllib import error as urllib_error
 from urllib import request as urllib_request
@@ -47,11 +49,29 @@ CONFIG_FILE = "dashboard_config.json"
 DATA_DIR = "data"
 HISTORY_DB_FILE = os.path.join(DATA_DIR, "energy_history.sqlite3")
 HISTORY_RETENTION_LIMIT = 5000
+LOG_FILE = os.path.join(DATA_DIR, "dashboard.log")
 
 
 # ============================================================
 # Helpers
 # ============================================================
+def setup_logging() -> logging.Logger:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    logger = logging.getLogger("emu_dashboard")
+    if logger.handlers:
+        return logger
+
+    logger.setLevel(logging.INFO)
+    handler = RotatingFileHandler(LOG_FILE, maxBytes=512_000, backupCount=3, encoding="utf-8")
+    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addHandler(handler)
+    logger.propagate = False
+    return logger
+
+
+LOGGER = setup_logging()
+
+
 def parse_hex_int(value: str) -> int:
     value = (value or "").strip()
     if value.lower().startswith("0x"):
@@ -1434,11 +1454,13 @@ class EmuDashboardApp:
                     self.data["comed_price_known"] = True
                     self.data["comed_price_time"] = price_time
                     self.data["last_update"] = price_time
+                    LOGGER.info("ComEd price updated to %.4f c/kWh at %s", price_cents, price_time)
                     self.refresh_ui()
                     self.maybe_record_history()
 
                 elif msg_type == "comed_error":
                     self.comed_fetch_in_progress = False
+                    LOGGER.error("%s", payload)
                     self.append_raw(f"[ERROR] {payload}")
                     self.refresh_ui()
 
@@ -1603,6 +1625,7 @@ class EmuDashboardApp:
             return
 
         self.comed_fetch_in_progress = True
+        LOGGER.info("Starting ComEd price refresh")
 
         def worker():
             try:
@@ -1616,17 +1639,40 @@ class EmuDashboardApp:
                 if not payload:
                     raise ValueError("ComEd feed returned no data")
 
-                latest = max(payload, key=lambda item: int(item.get("millisUTC", 0)))
-                price_cents = float(latest["price"])
-                millis_utc = int(latest["millisUTC"])
+                valid_rows = []
+                for item in payload:
+                    try:
+                        millis_utc = int(item.get("millisUTC", 0))
+                        price_cents = float(item["price"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+
+                    if not math.isfinite(price_cents):
+                        continue
+
+                    valid_rows.append((millis_utc, price_cents))
+
+                if not valid_rows:
+                    raise ValueError("ComEd feed returned no valid price rows")
+
+                millis_utc, price_cents = max(valid_rows, key=lambda item: item[0])
                 price_time = time.strftime(
                     "%Y-%m-%d %H:%M:%S",
                     time.localtime(millis_utc / 1000.0)
                 )
+                age_minutes = (time.time() * 1000.0 - millis_utc) / 60000.0
+                if age_minutes > 20:
+                    LOGGER.warning(
+                        "ComEd feed is stale by %.1f minutes; keeping latest available price %.4f c/kWh",
+                        age_minutes,
+                        price_cents,
+                    )
                 self.queue.put(("comed_price", (price_cents, price_time)))
             except (ValueError, KeyError, TypeError, urllib_error.URLError) as exc:
+                LOGGER.exception("ComEd price fetch failed")
                 self.queue.put(("comed_error", f"ComEd price fetch failed: {exc}"))
             except Exception as exc:
+                LOGGER.exception("Unexpected ComEd price error")
                 self.queue.put(("comed_error", f"Unexpected ComEd price error: {exc}"))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -1819,12 +1865,15 @@ class HeadlessDashboardApp:
                 self.comed_fetch_in_progress = False
                 price_cents, price_time = payload
                 self.data["comed_price_cents"] = price_cents
+                self.data["comed_price_known"] = True
                 self.data["comed_price_time"] = price_time
                 self.data["last_update"] = price_time
+                LOGGER.info("ComEd price updated to %.4f c/kWh at %s", price_cents, price_time)
                 self.refresh_ui()
                 self.maybe_record_history()
             elif msg_type == "comed_error":
                 self.comed_fetch_in_progress = False
+                LOGGER.error("%s", payload)
                 self.append_raw(f"[ERROR] {payload}")
                 self.refresh_ui()
 
