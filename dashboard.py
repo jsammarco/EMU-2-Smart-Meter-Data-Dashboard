@@ -73,25 +73,6 @@ def setup_logging() -> logging.Logger:
 LOGGER = setup_logging()
 
 
-def terminal_link(url: str, label: str | None = None) -> str:
-    label = label or url
-    term_program = (os.environ.get("TERM_PROGRAM") or "").lower()
-    term = (os.environ.get("TERM") or "").lower()
-
-    supports_links = any((
-        os.environ.get("WT_SESSION"),
-        os.environ.get("VSCODE_GIT_IPC_HANDLE"),
-        os.environ.get("ConEmuANSI") == "ON",
-        term_program in {"vscode", "wezterm"},
-        "xterm" in term,
-    ))
-
-    if not supports_links:
-        return label
-
-    return f"\033]8;;{url}\033\\{label}\033]8;;\033\\"
-
-
 def parse_hex_int(value: str) -> int:
     value = (value or "").strip()
     if value.lower().startswith("0x"):
@@ -1943,7 +1924,8 @@ def main():
 
     if args.headless:
         app = HeadlessDashboardApp(web_port=args.port)
-        print(f"Headless dashboard running on {terminal_link(url)} ({url})")
+        print("Headless dashboard running.")
+        print(url)
         try:
             while True:
                 time.sleep(1)
@@ -1953,7 +1935,8 @@ def main():
 
     root = tk.Tk()
     app = EmuDashboardApp(root, web_port=args.port)
-    print(f"Web dashboard running on {terminal_link(url)} ({url})")
+    print("Web dashboard running.")
+    print(url)
     root.mainloop()
 
 
