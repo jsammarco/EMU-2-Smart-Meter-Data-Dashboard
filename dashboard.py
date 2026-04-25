@@ -75,6 +75,20 @@ LOGGER = setup_logging()
 
 def terminal_link(url: str, label: str | None = None) -> str:
     label = label or url
+    term_program = (os.environ.get("TERM_PROGRAM") or "").lower()
+    term = (os.environ.get("TERM") or "").lower()
+
+    supports_links = any((
+        os.environ.get("WT_SESSION"),
+        os.environ.get("VSCODE_GIT_IPC_HANDLE"),
+        os.environ.get("ConEmuANSI") == "ON",
+        term_program in {"vscode", "wezterm"},
+        "xterm" in term,
+    ))
+
+    if not supports_links:
+        return label
+
     return f"\033]8;;{url}\033\\{label}\033]8;;\033\\"
 
 
