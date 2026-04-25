@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>EMU-2 Dashboard</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg: #0f172a;
+      --card: #111827;
+      --panel: #0b1220;
+      --border: #243244;
+      --text: #f8fafc;
+      --muted: #cbd5e1;
+      --chip-active: #14532d;
+      --chip-active-border: #22c55e;
+      --chip-error: #7f1d1d;
+      --chip-error-border: #f87171;
+    }
+    body { background: linear-gradient(180deg, var(--bg) 0%, var(--card) 100%); color: var(--text); transition: background .25s ease, color .25s ease; }
+    .card, .accordion-item { background: var(--card); border: 1px solid var(--border); }
+    .card, .accordion-item, .accordion-button, .accordion-body, .table-dark, .status-chip { transition: background-color .25s ease, border-color .25s ease, color .25s ease; }
+    .muted, .small { color: var(--muted) !important; }
+    .metric-label { color: #dbeafe; font-size: .82rem; letter-spacing: .03em; text-transform: uppercase; }
+    .metric-value { font-size: clamp(1.35rem, 3vw, 2rem); font-weight: 700; color: #fff; }
+    .detail-value { color: #f8fafc; font-weight: 500; }
+    .status-chip {
+      border-radius: 999px;
+      padding: .35rem .75rem;
+      background: #172033;
+      color: #fff;
+      border: 1px solid var(--border);
+      text-decoration: none;
+      transition: background-color .2s ease, border-color .2s ease;
+    }
+    .status-chip-active { background: var(--chip-active); border-color: var(--chip-active-border); }
+    .status-chip-error { background: var(--chip-error); border-color: var(--chip-error-border); }
+    .chart-wrap { height: 320px; }
+    .accordion-button { background: var(--card); color: var(--text); }
+    .accordion-button:not(.collapsed) { background: var(--panel); color: var(--text); box-shadow: none; }
+    .accordion-button:focus { box-shadow: none; }
+    .accordion-body { background: var(--panel); color: var(--text); }
+    .table-dark { --bs-table-bg: var(--panel); --bs-table-color: var(--text); --bs-table-border-color: var(--border); }
+    code { color: #f472b6; }
+    body.theme-high {
+      --bg: #7f3b3b;
+      --card: #a64e4e;
+      --panel: #8d4242;
+      --border: #f3b0a8;
+      --text: #fff7f5;
+      --muted: #ffd6cf;
+    }
+    body.theme-low {
+      --bg: #134e4a;
+      --card: #16615c;
+      --panel: #0f4a45;
+      --border: #86efac;
+      --text: #f0fdf4;
+      --muted: #bbf7d0;
+    }
+  </style>
+</head>
+<body>
+  <div class="container py-3 py-md-4" style="max-width: 1440px;">
+    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
+      <div>
+        <h1 class="h3 mb-1 text-white">EMU-2 Dashboard</h1>
+        <div class="muted">Mobile-friendly web view on port $web_port</div>
+      </div>
+      <div class="d-flex flex-wrap gap-2">
+        <span class="status-chip" id="portText">Port: --</span>
+        <span class="status-chip" id="pricingText">Pricing: --</span>
+        <button class="status-chip" id="wakeLockButton" type="button">Wake Lock Auto</button>
+      </div>
+    </div>
+
+    <div class="row g-3 mb-3">
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Live Demand</div><div class="metric-value" id="demandValue">--</div></div></div></div>
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Current Price</div><div class="metric-value" id="priceValue">--</div></div></div></div>
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Current Period Usage</div><div class="metric-value" id="usageValue">--</div></div></div></div>
+      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Estimated Cost / Hour</div><div class="metric-value" id="costValue">--</div></div></div></div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-body d-flex flex-column flex-lg-row justify-content-between gap-3">
+        <div>
+          <div class="metric-label">System Status</div>
+          <div class="fs-5 text-white" id="statusText">Loading...</div>
+        </div>
+        <div class="row row-cols-2 row-cols-lg-4 g-3 flex-grow-1">
+          <div><div class="metric-label">Network</div><div class="detail-value" id="networkValue">--</div></div>
+          <div><div class="metric-label">Link Strength</div><div class="detail-value" id="signalValue">--</div></div>
+          <div><div class="metric-label">Last Update</div><div class="detail-value" id="updatedValue">--</div></div>
+          <div><div class="metric-label">Local Meter Time</div><div class="detail-value" id="localTimeValue">--</div></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card mb-3">
+      <div class="card-body">
+        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center mb-3 gap-2">
+          <div>
+            <h2 class="h5 mb-1 text-white">Recent History</h2>
+            <div class="muted">Only confirmed readings are stored in the local SQLite database.</div>
+          </div>
+        </div>
+        <div class="chart-wrap"><canvas id="historyChart"></canvas></div>
+      </div>
+    </div>
+
+    <div class="accordion" id="infoAccordion">
+      <div class="accordion-item mb-3">
+        <h2 class="accordion-header">
+          <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#detailsCollapse" aria-expanded="true">
+            Meter Details
+          </button>
+        </h2>
+        <div id="detailsCollapse" class="accordion-collapse collapse show" data-bs-parent="#infoAccordion">
+          <div class="accordion-body">
+            <div class="row g-3">
+              <div class="col-12 col-lg-6"><div class="metric-label">Model / Firmware</div><div class="detail-value" id="firmwareValue">--</div></div>
+              <div class="col-12 col-lg-6"><div class="metric-label">Source Summary</div><div class="detail-value" id="summaryText">--</div></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="accordion-item mb-3">
+        <h2 class="accordion-header">
+          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#scheduleCollapse" aria-expanded="false">
+            Schedule Entries
+          </button>
+        </h2>
+        <div id="scheduleCollapse" class="accordion-collapse collapse" data-bs-parent="#infoAccordion">
+          <div class="accordion-body">
+            <div class="table-responsive">
+              <table class="table table-dark table-sm align-middle mb-0">
+                <tbody id="scheduleBody">
+                  <tr><td class="muted">No schedule data yet.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+  <script>
+    let chart;
+    let wakeLock = null;
+    let wakeLockRequested = true;
+    const HIGH_PRICE_THEME_THRESHOLD = 10.0;
+    const LOW_PRICE_THEME_THRESHOLD = 1.0;
+
+    function getPriceThemeName(priceCents) {
+      if (priceCents > HIGH_PRICE_THEME_THRESHOLD) {
+        return 'high';
+      }
+      if (priceCents < LOW_PRICE_THEME_THRESHOLD) {
+        return 'low';
+      }
+      return 'default';
+    }
+
+    function applyPriceTheme(priceCents) {
+      const themeName = getPriceThemeName(priceCents);
+      document.body.classList.remove('theme-high', 'theme-low');
+      if (themeName === 'high') {
+        document.body.classList.add('theme-high');
+      } else if (themeName === 'low') {
+        document.body.classList.add('theme-low');
+      }
+    }
+
+    function setWakeLockStatus(message, state = 'idle') {
+      const button = document.getElementById('wakeLockButton');
+      button.classList.remove('status-chip-active', 'status-chip-error');
+
+      if (state === 'active') {
+        button.classList.add('status-chip-active');
+        button.textContent = 'Screen Awake';
+      } else if (state === 'error') {
+        button.classList.add('status-chip-error');
+        button.textContent = 'Wake Lock Unavailable';
+      } else {
+        button.textContent = wakeLockRequested ? 'Wake Lock Auto' : 'Wake Lock Off';
+      }
+    }
+
+    async function requestWakeLock() {
+      if (!('wakeLock' in navigator)) {
+        setWakeLockStatus('Wake lock is not supported in this browser.', 'error');
+        return;
+      }
+
+      try {
+        wakeLock = await navigator.wakeLock.request('screen');
+        wakeLockRequested = true;
+        setWakeLockStatus('Wake lock is active while this page stays visible.', 'active');
+
+        wakeLock.addEventListener('release', () => {
+          wakeLock = null;
+          if (document.visibilityState === 'visible' && wakeLockRequested) {
+            setWakeLockStatus('Wake lock was released. Tap again if the browser did not restore it.', 'idle');
+          } else {
+            setWakeLockStatus('Wake lock is off. Tap the button to keep the screen awake while this page is open.', 'idle');
+          }
+        });
+      } catch (err) {
+        wakeLock = null;
+        wakeLockRequested = false;
+        setWakeLockStatus(`Wake lock failed: ${err.name}. Tap again after interacting with the page.`, 'error');
+        console.error(`${err.name}, ${err.message}`);
+      }
+    }
+
+    async function releaseWakeLock() {
+      wakeLockRequested = false;
+      if (wakeLock !== null) {
+        await wakeLock.release();
+        wakeLock = null;
+      }
+      setWakeLockStatus('Wake lock is off. Tap the button to keep the screen awake while this page is open.', 'idle');
+    }
+
+    async function toggleWakeLock() {
+      if (wakeLock) {
+        await releaseWakeLock();
+        return;
+      }
+      wakeLockRequested = true;
+      await requestWakeLock();
+    }
+
+    async function reRequestWakeLockIfNeeded() {
+      if (document.visibilityState === 'visible' && wakeLockRequested && !wakeLock) {
+        await requestWakeLock();
+      }
+    }
+
+    function ensureChart(labels, priceSeries, usageSeries) {
+      const canvas = document.getElementById('historyChart');
+      const ctx = canvas.getContext('2d');
+      const safeLabels = Array.isArray(labels) ? labels : [];
+      const safePrice = Array.isArray(priceSeries) ? priceSeries.map(Number) : [];
+      const safeUsage = Array.isArray(usageSeries) ? usageSeries.map(Number) : [];
+      if (!chart) {
+        chart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: safeLabels,
+            datasets: [
+              {
+                label: 'Price (c/kWh)',
+                data: safePrice,
+                borderColor: '#38bdf8',
+                backgroundColor: 'rgba(56, 189, 248, 0.18)',
+                tension: 0.25,
+                yAxisID: 'y',
+                pointRadius: 2,
+                borderWidth: 2
+              },
+              {
+                label: 'Usage (kWh)',
+                data: safeUsage,
+                borderColor: '#22c55e',
+                backgroundColor: 'rgba(34, 197, 94, 0.18)',
+                tension: 0.25,
+                yAxisID: 'y1',
+                pointRadius: 2,
+                borderWidth: 2
+              }
+            ]
+          },
+          options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            interaction: { mode: 'index', intersect: false },
+            plugins: {
+              legend: { labels: { color: '#f8fafc' } }
+            },
+            scales: {
+              x: {
+                type: 'category',
+                ticks: { color: '#e2e8f0', maxTicksLimit: 8 },
+                grid: { color: '#223147' }
+              },
+              y: {
+                type: 'linear',
+                position: 'left',
+                beginAtZero: false,
+                ticks: { color: '#7dd3fc' },
+                grid: { color: '#223147' }
+              },
+              y1: {
+                type: 'linear',
+                position: 'right',
+                beginAtZero: false,
+                ticks: { color: '#86efac' },
+                grid: { drawOnChartArea: false }
+              }
+            }
+          }
+        });
+      } else {
+        chart.data.labels = safeLabels;
+        chart.data.datasets[0].data = safePrice;
+        chart.data.datasets[1].data = safeUsage;
+        chart.update();
+      }
+    }
+
+    function updateSchedule(lines) {
+      const body = document.getElementById('scheduleBody');
+      if (!lines.length) {
+        body.innerHTML = '<tr><td class="muted">No schedule data yet.</td></tr>';
+        return;
+      }
+      body.innerHTML = lines.slice(-8).map(line => `<tr><td>${line}</td></tr>`).join('');
+    }
+
+    function applySnapshot(snapshot) {
+      applyPriceTheme(Number(snapshot.price_cents || 0));
+      document.getElementById('statusText').textContent = snapshot.status_text || '--';
+      document.getElementById('portText').textContent = `Port: ${snapshot.com_port || '--'}`;
+      document.getElementById('pricingText').textContent = `Pricing: ${snapshot.pricing_source || '--'}`;
+      document.getElementById('demandValue').textContent = `${snapshot.demand_kw.toFixed(3)} kW`;
+      document.getElementById('priceValue').textContent = `${snapshot.price_cents.toFixed(2)} c/kWh`;
+      document.getElementById('usageValue').textContent = `${snapshot.current_period_kwh.toFixed(3)} kWh`;
+      document.getElementById('costValue').textContent = `$${snapshot.cost_per_hour.toFixed(2)}/hr`;
+      document.getElementById('networkValue').textContent = snapshot.network_status || '--';
+      document.getElementById('signalValue').textContent = snapshot.link_strength || '--';
+      document.getElementById('updatedValue').textContent = snapshot.last_update || '--';
+      document.getElementById('localTimeValue').textContent = snapshot.local_time || '--';
+      document.getElementById('firmwareValue').textContent = snapshot.firmware || '--';
+      document.getElementById('summaryText').textContent = `${snapshot.com_port || '--'} | ${snapshot.pricing_source || '--'} | ${snapshot.price_cents.toFixed(2)} c/kWh`;
+      updateSchedule(snapshot.schedule_lines || []);
+    }
+
+    async function refreshData() {
+      const [snapshotResp, historyResp] = await Promise.all([
+        fetch('/api/snapshot'),
+        fetch('/api/history')
+      ]);
+      const snapshot = await snapshotResp.json();
+      const history = await historyResp.json();
+      applySnapshot(snapshot);
+      ensureChart(history.labels, history.price_cents, history.usage_kwh);
+    }
+
+    document.getElementById('wakeLockButton').addEventListener('click', toggleWakeLock);
+    document.addEventListener('visibilitychange', reRequestWakeLockIfNeeded);
+    window.addEventListener('focus', reRequestWakeLockIfNeeded);
+    window.addEventListener('pageshow', reRequestWakeLockIfNeeded);
+    document.addEventListener('click', reRequestWakeLockIfNeeded, { passive: true });
+    document.addEventListener('touchstart', reRequestWakeLockIfNeeded, { passive: true });
+
+    requestWakeLock();
+    refreshData();
+    setInterval(refreshData, 5000);
+  </script>
+</body>
+</html>

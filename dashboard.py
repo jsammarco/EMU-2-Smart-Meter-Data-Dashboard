@@ -6,6 +6,8 @@ import os
 import queue
 import re
 import sqlite3
+import socket
+import string
 import threading
 import time
 import tkinter as tk
@@ -38,6 +40,8 @@ WINDOW_SIZE = "1360x960"
 MAX_DEMAND_KW = 12.0          # adjust if you want
 MIN_PRICE_CENTS = -5.0        # ComEd can occasionally go negative
 MAX_PRICE_CENTS = 30.0        # adjust if you want
+HIGH_PRICE_THEME_THRESHOLD = 10.0
+LOW_PRICE_THEME_THRESHOLD = 1.0
 
 PRICING_SOURCE_NONE = "No Pricing Source"
 PRICING_SOURCE_EMU = "EMU-2 Price"
@@ -51,6 +55,39 @@ DATA_DIR = "data"
 HISTORY_DB_FILE = os.path.join(DATA_DIR, "energy_history.sqlite3")
 HISTORY_RETENTION_LIMIT = 5000
 LOG_FILE = os.path.join(DATA_DIR, "dashboard.log")
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+TEMPLATE_DIR = os.path.join(BASE_DIR, "templates")
+WEB_TEMPLATE_FILE = os.path.join(TEMPLATE_DIR, "web_dashboard.html")
+
+DEFAULT_THEME = {
+    "window_bg": "#0F172A",
+    "card_bg": "#111827",
+    "panel_bg": "#0B1220",
+    "border": "#243244",
+    "text": "#F9FAFB",
+    "muted": "#94A3B8",
+    "card_label": "#E5E7EB",
+}
+
+HIGH_PRICE_THEME = {
+    "window_bg": "#7F3B3B",
+    "card_bg": "#A64E4E",
+    "panel_bg": "#8D4242",
+    "border": "#F3B0A8",
+    "text": "#FFF7F5",
+    "muted": "#FFD6CF",
+    "card_label": "#FFE7E2",
+}
+
+LOW_PRICE_THEME = {
+    "window_bg": "#134E4A",
+    "card_bg": "#16615C",
+    "panel_bg": "#0F4A45",
+    "border": "#86EFAC",
+    "text": "#F0FDF4",
+    "muted": "#BBF7D0",
+    "card_label": "#DCFCE7",
+}
 
 
 # ============================================================
@@ -188,242 +225,42 @@ def list_serial_port_names() -> list[str]:
     return ports
 
 
+def list_web_dashboard_urls(port: int) -> list[str]:
+    urls = [f"http://127.0.0.1:{port}", f"http://localhost:{port}"]
+    seen_hosts = {"127.0.0.1", "localhost"}
+
+    def add_host(host: str):
+        host = (host or "").strip()
+        if not host or host.startswith("127.") or host == "0.0.0.0" or host in seen_hosts:
+            return
+        seen_hosts.add(host)
+        urls.append(f"http://{host}:{port}")
+
+    try:
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            sock.connect(("8.8.8.8", 80))
+            add_host(sock.getsockname()[0])
+        finally:
+            sock.close()
+    except Exception:
+        pass
+
+    try:
+        hostname = socket.gethostname()
+        for family, _, _, _, sockaddr in socket.getaddrinfo(hostname, None, family=socket.AF_INET):
+            if family == socket.AF_INET and sockaddr:
+                add_host(sockaddr[0])
+    except Exception:
+        pass
+
+    return urls
+
+
 def build_web_dashboard_html(port: int) -> str:
-    return f"""<!doctype html>
-<html lang="en">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>EMU-2 Dashboard</title>
-  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
-  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.3/dist/chart.umd.min.js"></script>
-  <style>
-    :root {{
-      --bg: #0f172a;
-      --card: #111827;
-      --border: #243244;
-      --text: #f8fafc;
-      --muted: #cbd5e1;
-    }}
-    body {{ background: linear-gradient(180deg, #0f172a 0%, #111827 100%); color: var(--text); }}
-    .card, .accordion-item {{ background: rgba(17, 24, 39, 0.96); border: 1px solid var(--border); }}
-    .muted, .small {{ color: var(--muted) !important; }}
-    .metric-label {{ color: #dbeafe; font-size: .82rem; letter-spacing: .03em; text-transform: uppercase; }}
-    .metric-value {{ font-size: clamp(1.35rem, 3vw, 2rem); font-weight: 700; color: #fff; }}
-    .status-chip {{ border-radius: 999px; padding: .35rem .75rem; background: #172033; color: #fff; border: 1px solid var(--border); }}
-    .chart-wrap {{ height: 320px; }}
-    .accordion-button {{ background: #152033; color: #fff; }}
-    .accordion-button:not(.collapsed) {{ background: #1b2a44; color: #fff; box-shadow: none; }}
-    .accordion-button:focus {{ box-shadow: none; }}
-    .accordion-body {{ background: rgba(11, 18, 32, 0.92); color: #f8fafc; }}
-    .table-dark {{ --bs-table-bg: #0b1220; --bs-table-color: #f8fafc; --bs-table-border-color: #223147; }}
-    code {{ color: #f472b6; }}
-  </style>
-</head>
-<body>
-  <div class="container py-3 py-md-4" style="max-width: 1440px;">
-    <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center gap-3 mb-4">
-      <div>
-        <h1 class="h3 mb-1 text-white">EMU-2 Dashboard</h1>
-        <div class="muted">Mobile-friendly web view on port {port}</div>
-      </div>
-      <div class="d-flex flex-wrap gap-2">
-        <span class="status-chip" id="portText">Port: --</span>
-        <span class="status-chip" id="pricingText">Pricing: --</span>
-      </div>
-    </div>
-
-    <div class="row g-3 mb-3">
-      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Live Demand</div><div class="metric-value" id="demandValue">--</div></div></div></div>
-      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Current Price</div><div class="metric-value" id="priceValue">--</div></div></div></div>
-      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Current Period Usage</div><div class="metric-value" id="usageValue">--</div></div></div></div>
-      <div class="col-6 col-xl-3"><div class="card h-100"><div class="card-body"><div class="metric-label">Estimated Cost / Hour</div><div class="metric-value" id="costValue">--</div></div></div></div>
-    </div>
-
-    <div class="card mb-3">
-      <div class="card-body d-flex flex-column flex-lg-row justify-content-between gap-3">
-        <div>
-          <div class="metric-label">System Status</div>
-          <div class="fs-5 text-white" id="statusText">Loading...</div>
-        </div>
-        <div class="row row-cols-2 row-cols-lg-4 g-3 flex-grow-1">
-          <div><div class="metric-label">Network</div><div id="networkValue">--</div></div>
-          <div><div class="metric-label">Link Strength</div><div id="signalValue">--</div></div>
-          <div><div class="metric-label">Last Update</div><div id="updatedValue">--</div></div>
-          <div><div class="metric-label">Local Meter Time</div><div id="localTimeValue">--</div></div>
-        </div>
-      </div>
-    </div>
-
-    <div class="card mb-3">
-      <div class="card-body">
-        <div class="d-flex flex-column flex-lg-row justify-content-between align-items-lg-center mb-3 gap-2">
-          <div>
-            <h2 class="h5 mb-1 text-white">Recent History</h2>
-            <div class="muted">Only confirmed readings are stored in the local SQLite database.</div>
-          </div>
-        </div>
-        <div class="chart-wrap"><canvas id="historyChart"></canvas></div>
-      </div>
-    </div>
-
-    <div class="accordion" id="infoAccordion">
-      <div class="accordion-item mb-3">
-        <h2 class="accordion-header">
-          <button class="accordion-button" type="button" data-bs-toggle="collapse" data-bs-target="#detailsCollapse" aria-expanded="true">
-            Meter Details
-          </button>
-        </h2>
-        <div id="detailsCollapse" class="accordion-collapse collapse show" data-bs-parent="#infoAccordion">
-          <div class="accordion-body">
-            <div class="row g-3">
-              <div class="col-12 col-lg-6"><div class="metric-label">Model / Firmware</div><div id="firmwareValue">--</div></div>
-              <div class="col-12 col-lg-6"><div class="metric-label">Source Summary</div><div id="summaryText">--</div></div>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <div class="accordion-item mb-3">
-        <h2 class="accordion-header">
-          <button class="accordion-button collapsed" type="button" data-bs-toggle="collapse" data-bs-target="#scheduleCollapse" aria-expanded="false">
-            Schedule Entries
-          </button>
-        </h2>
-        <div id="scheduleCollapse" class="accordion-collapse collapse" data-bs-parent="#infoAccordion">
-          <div class="accordion-body">
-            <div class="table-responsive">
-              <table class="table table-dark table-sm align-middle mb-0">
-                <tbody id="scheduleBody">
-                  <tr><td class="muted">No schedule data yet.</td></tr>
-                </tbody>
-              </table>
-            </div>
-          </div>
-        </div>
-      </div>
-
-    </div>
-  </div>
-
-  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
-  <script>
-    let chart;
-
-    function ensureChart(labels, priceSeries, usageSeries) {{
-      const canvas = document.getElementById('historyChart');
-      const ctx = canvas.getContext('2d');
-      const safeLabels = Array.isArray(labels) ? labels : [];
-      const safePrice = Array.isArray(priceSeries) ? priceSeries.map(Number) : [];
-      const safeUsage = Array.isArray(usageSeries) ? usageSeries.map(Number) : [];
-      if (!chart) {{
-        chart = new Chart(ctx, {{
-          type: 'line',
-          data: {{
-            labels: safeLabels,
-            datasets: [
-              {{
-                label: 'Price (c/kWh)',
-                data: safePrice,
-                borderColor: '#38bdf8',
-                backgroundColor: 'rgba(56, 189, 248, 0.18)',
-                tension: 0.25,
-                yAxisID: 'y',
-                pointRadius: 2,
-                borderWidth: 2
-              }},
-              {{
-                label: 'Usage (kWh)',
-                data: safeUsage,
-                borderColor: '#22c55e',
-                backgroundColor: 'rgba(34, 197, 94, 0.18)',
-                tension: 0.25,
-                yAxisID: 'y1',
-                pointRadius: 2,
-                borderWidth: 2
-              }}
-            ]
-          }},
-          options: {{
-            responsive: true,
-            maintainAspectRatio: false,
-            interaction: {{ mode: 'index', intersect: false }},
-            plugins: {{
-              legend: {{ labels: {{ color: '#f8fafc' }} }}
-            }},
-            scales: {{
-              x: {{
-                type: 'category',
-                ticks: {{ color: '#e2e8f0', maxTicksLimit: 8 }},
-                grid: {{ color: '#223147' }}
-              }},
-              y: {{
-                type: 'linear',
-                position: 'left',
-                beginAtZero: false,
-                ticks: {{ color: '#7dd3fc' }},
-                grid: {{ color: '#223147' }}
-              }},
-              y1: {{
-                type: 'linear',
-                position: 'right',
-                beginAtZero: false,
-                ticks: {{ color: '#86efac' }},
-                grid: {{ drawOnChartArea: false }}
-              }}
-            }}
-          }}
-        }});
-      }} else {{
-        chart.data.labels = safeLabels;
-        chart.data.datasets[0].data = safePrice;
-        chart.data.datasets[1].data = safeUsage;
-        chart.update();
-      }}
-    }}
-
-    function updateSchedule(lines) {{
-      const body = document.getElementById('scheduleBody');
-      if (!lines.length) {{
-        body.innerHTML = '<tr><td class="muted">No schedule data yet.</td></tr>';
-        return;
-      }}
-      body.innerHTML = lines.slice(-8).map(line => `<tr><td>${{line}}</td></tr>`).join('');
-    }}
-
-    function applySnapshot(snapshot) {{
-      document.getElementById('statusText').textContent = snapshot.status_text || '--';
-      document.getElementById('portText').textContent = `Port: ${{snapshot.com_port || '--'}}`;
-      document.getElementById('pricingText').textContent = `Pricing: ${{snapshot.pricing_source || '--'}}`;
-      document.getElementById('demandValue').textContent = `${{snapshot.demand_kw.toFixed(3)}} kW`;
-      document.getElementById('priceValue').textContent = `${{snapshot.price_cents.toFixed(2)}} c/kWh`;
-      document.getElementById('usageValue').textContent = `${{snapshot.current_period_kwh.toFixed(3)}} kWh`;
-      document.getElementById('costValue').textContent = `$${{snapshot.cost_per_hour.toFixed(2)}}/hr`;
-      document.getElementById('networkValue').textContent = snapshot.network_status || '--';
-      document.getElementById('signalValue').textContent = snapshot.link_strength || '--';
-      document.getElementById('updatedValue').textContent = snapshot.last_update || '--';
-      document.getElementById('localTimeValue').textContent = snapshot.local_time || '--';
-      document.getElementById('firmwareValue').textContent = snapshot.firmware || '--';
-      document.getElementById('summaryText').textContent = `${{snapshot.com_port || '--'}} | ${{snapshot.pricing_source || '--'}} | ${{snapshot.price_cents.toFixed(2)}} c/kWh`;
-      updateSchedule(snapshot.schedule_lines || []);
-    }}
-
-    async function refreshData() {{
-      const [snapshotResp, historyResp] = await Promise.all([
-        fetch('/api/snapshot'),
-        fetch('/api/history')
-      ]);
-      const snapshot = await snapshotResp.json();
-      const history = await historyResp.json();
-      applySnapshot(snapshot);
-      ensureChart(history.labels, history.price_cents, history.usage_kwh);
-    }}
-
-    refreshData();
-    setInterval(refreshData, 5000);
-  </script>
-</body>
-</html>"""
+    with open(WEB_TEMPLATE_FILE, "r", encoding="utf-8") as fh:
+        template = string.Template(fh.read())
+    return template.safe_substitute(web_port=port)
 
 
 class DashboardWebServer:
@@ -521,6 +358,10 @@ class SemiGauge(tk.Canvas):
 
         self.draw_static()
         self.update_value(0.0)
+
+    def set_background(self, color: str):
+        self.configure(bg=color)
+        self.draw_static()
 
     def draw_static(self):
         self.delete("all")
@@ -820,6 +661,7 @@ class EmuDashboardApp:
         self.last_history_signature = None
         self.last_history_save_time = ""
         self.web_server = DashboardWebServer(self, self.web_port)
+        self.current_theme_name = None
 
         self.data = {
             "device_mac": "",
@@ -867,22 +709,15 @@ class EmuDashboardApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close)
 
     def _build_ui(self):
-        style = ttk.Style()
+        self.style = ttk.Style()
         try:
-            style.theme_use("clam")
+            self.style.theme_use("clam")
         except Exception:
             pass
 
-        style.configure("TFrame", background="#0F172A")
-        style.configure("Card.TFrame", background="#111827")
-        style.configure("TLabel", background="#0F172A", foreground="#F9FAFB", font=("Segoe UI", 11))
-        style.configure("Header.TLabel", background="#0F172A", foreground="#F9FAFB", font=("Segoe UI", 20, "bold"))
-        style.configure("Sub.TLabel", background="#0F172A", foreground="#94A3B8", font=("Segoe UI", 10))
-        style.configure("CardLabel.TLabel", background="#111827", foreground="#E5E7EB", font=("Segoe UI", 10))
-        style.configure("CardValue.TLabel", background="#111827", foreground="#F9FAFB", font=("Segoe UI", 18, "bold"))
-        style.configure("TButton", font=("Segoe UI", 10))
-        style.configure("Dashboard.TCombobox", fieldbackground="#F8FAFC", background="#F8FAFC", foreground="#111827", arrowcolor="#111827")
-        style.map(
+        self.style.configure("TButton", font=("Segoe UI", 10))
+        self.style.configure("Dashboard.TCombobox", fieldbackground="#F8FAFC", background="#F8FAFC", foreground="#111827", arrowcolor="#111827")
+        self.style.map(
             "Dashboard.TCombobox",
             fieldbackground=[("readonly", "#F8FAFC")],
             foreground=[("readonly", "#111827")],
@@ -892,6 +727,7 @@ class EmuDashboardApp:
 
         outer = ttk.Frame(self.root)
         outer.pack(fill="both", expand=True, padx=14, pady=14)
+        self.outer_frame = outer
 
         # Header
         header = ttk.Frame(outer)
@@ -916,6 +752,18 @@ class EmuDashboardApp:
         self.com_port_combo.pack(side="left")
         self.com_port_combo.bind("<<ComboboxSelected>>", self.on_com_port_changed)
         ttk.Button(connection_row, text="Refresh Ports", command=self.refresh_com_ports).pack(side="left", padx=(8, 0))
+
+        self.web_urls_var = tk.StringVar(value="\n".join(list_web_dashboard_urls(self.web_port)))
+        web_row = ttk.Frame(outer)
+        web_row.pack(fill="x", pady=(0, 10))
+        ttk.Label(web_row, text="Web URLs", style="Sub.TLabel").pack(side="left", anchor="n", padx=(0, 8))
+        ttk.Label(
+            web_row,
+            textvariable=self.web_urls_var,
+            style="Sub.TLabel",
+            justify="left",
+            wraplength=900
+        ).pack(side="left", fill="x", expand=True)
 
         # Top section
         top = ttk.Frame(outer)
@@ -1032,7 +880,7 @@ class EmuDashboardApp:
         self.history_canvas = tk.Canvas(
             history_card,
             height=240,
-            bg="#0B1220",
+            bg=DEFAULT_THEME["panel_bg"],
             highlightthickness=0
         )
         self.history_canvas.pack(fill="x", padx=12, pady=(0, 12))
@@ -1046,9 +894,9 @@ class EmuDashboardApp:
         self.schedule_text = scrolledtext.ScrolledText(
             schedule_card,
             height=10,
-            bg="#0B1220",
-            fg="#E5E7EB",
-            insertbackground="#E5E7EB",
+            bg=DEFAULT_THEME["panel_bg"],
+            fg=DEFAULT_THEME["card_label"],
+            insertbackground=DEFAULT_THEME["card_label"],
             relief="flat",
             font=("Consolas", 10)
         )
@@ -1063,15 +911,71 @@ class EmuDashboardApp:
 
         self.raw_text = scrolledtext.ScrolledText(
             raw_card,
-            bg="#0B1220",
-            fg="#E5E7EB",
-            insertbackground="#E5E7EB",
+            bg=DEFAULT_THEME["panel_bg"],
+            fg=DEFAULT_THEME["card_label"],
+            insertbackground=DEFAULT_THEME["card_label"],
             relief="flat",
             font=("Consolas", 10)
         )
         self.raw_text.pack(fill="both", expand=True, padx=12, pady=(0, 12))
         self.raw_text.config(state="disabled")
         self.refresh_com_ports()
+        self.apply_price_theme(self.get_price_theme_name(0.0))
+
+    def get_price_theme_name(self, price_cents: float) -> str:
+        if price_cents > HIGH_PRICE_THEME_THRESHOLD:
+            return "high"
+        if price_cents < LOW_PRICE_THEME_THRESHOLD:
+            return "low"
+        return "default"
+
+    def get_theme_palette(self, theme_name: str) -> dict:
+        if theme_name == "high":
+            return HIGH_PRICE_THEME
+        if theme_name == "low":
+            return LOW_PRICE_THEME
+        return DEFAULT_THEME
+
+    def apply_price_theme(self, theme_name: str):
+        if theme_name == self.current_theme_name:
+            return
+
+        palette = self.get_theme_palette(theme_name)
+        self.current_theme_name = theme_name
+
+        self.root.configure(bg=palette["window_bg"])
+        self.style.configure("TFrame", background=palette["window_bg"])
+        self.style.configure("Card.TFrame", background=palette["card_bg"])
+        self.style.configure("TLabel", background=palette["window_bg"], foreground=palette["text"], font=("Segoe UI", 11))
+        self.style.configure("Header.TLabel", background=palette["window_bg"], foreground=palette["text"], font=("Segoe UI", 20, "bold"))
+        self.style.configure("Sub.TLabel", background=palette["window_bg"], foreground=palette["muted"], font=("Segoe UI", 10))
+        self.style.configure("CardLabel.TLabel", background=palette["card_bg"], foreground=palette["card_label"], font=("Segoe UI", 10))
+        self.style.configure("CardValue.TLabel", background=palette["card_bg"], foreground=palette["text"], font=("Segoe UI", 18, "bold"))
+
+        if hasattr(self, "demand_gauge"):
+            self.demand_gauge.set_background(palette["card_bg"])
+        if hasattr(self, "price_gauge"):
+            self.price_gauge.set_background(palette["card_bg"])
+        if hasattr(self, "history_canvas"):
+            self.history_canvas.configure(bg=palette["panel_bg"])
+        if hasattr(self, "schedule_text"):
+            self.schedule_text.configure(
+                bg=palette["panel_bg"],
+                fg=palette["card_label"],
+                insertbackground=palette["card_label"]
+            )
+        if hasattr(self, "raw_text"):
+            self.raw_text.configure(
+                bg=palette["panel_bg"],
+                fg=palette["card_label"],
+                insertbackground=palette["card_label"]
+            )
+
+        if hasattr(self, "outer_frame"):
+            self.outer_frame.configure(style="TFrame")
+
+        if hasattr(self, "history_canvas"):
+            self.refresh_history_chart()
 
     def _start_serial(self):
         self.stop_serial_worker()
@@ -1283,6 +1187,7 @@ class EmuDashboardApp:
             "firmware": firmware,
             "schedule_lines": list(self.data["schedule_lines"]),
             "status_text": self.status_var.get(),
+            "web_urls": list_web_dashboard_urls(self.web_port),
         }
 
     def get_history_payload(self, limit=240):
@@ -1569,6 +1474,7 @@ class EmuDashboardApp:
         self.data["price_cents"] = price_cents
         current_period_kwh = self.data["current_period_kwh"]
         lifetime_kwh = self.data["lifetime_kwh"]
+        self.apply_price_theme(self.get_price_theme_name(price_cents))
 
         cost_per_hour = demand_kw * (price_cents / 100.0)
 
@@ -1920,12 +1826,13 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Run without the Tk GUI")
     parser.add_argument("--port", type=int, default=8000, help="Web server port (default: 8000)")
     args = parser.parse_args()
-    url = f"http://127.0.0.1:{args.port}"
+    urls = list_web_dashboard_urls(args.port)
 
     if args.headless:
         app = HeadlessDashboardApp(web_port=args.port)
         print("Headless dashboard running.")
-        print(url)
+        for url in urls:
+            print(url)
         try:
             while True:
                 time.sleep(1)
@@ -1936,7 +1843,8 @@ def main():
     root = tk.Tk()
     app = EmuDashboardApp(root, web_port=args.port)
     print("Web dashboard running.")
-    print(url)
+    for url in urls:
+        print(url)
     root.mainloop()
 
 
