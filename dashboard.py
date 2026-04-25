@@ -73,6 +73,11 @@ def setup_logging() -> logging.Logger:
 LOGGER = setup_logging()
 
 
+def terminal_link(url: str, label: str | None = None) -> str:
+    label = label or url
+    return f"\033]8;;{url}\033\\{label}\033]8;;\033\\"
+
+
 def parse_hex_int(value: str) -> int:
     value = (value or "").strip()
     if value.lower().startswith("0x"):
@@ -1920,10 +1925,11 @@ def main():
     parser.add_argument("--headless", action="store_true", help="Run without the Tk GUI")
     parser.add_argument("--port", type=int, default=8000, help="Web server port (default: 8000)")
     args = parser.parse_args()
+    url = f"http://127.0.0.1:{args.port}"
 
     if args.headless:
         app = HeadlessDashboardApp(web_port=args.port)
-        print(f"Headless dashboard running on http://127.0.0.1:{args.port}")
+        print(f"Headless dashboard running on {terminal_link(url)} ({url})")
         try:
             while True:
                 time.sleep(1)
@@ -1933,7 +1939,7 @@ def main():
 
     root = tk.Tk()
     app = EmuDashboardApp(root, web_port=args.port)
-    print(f"Web dashboard running on http://127.0.0.1:{args.port}")
+    print(f"Web dashboard running on {terminal_link(url)} ({url})")
     root.mainloop()
 
 
